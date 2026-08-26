@@ -26,6 +26,7 @@ class VRM4U_API UVrmRuntimeSettings : public UObject
 		))
 	uint32 bDropVRMFileEnable:1;
 
+	/** Allow imports for every file format supported by Assimp, including PMX/MMD models. */
 	UPROPERTY(config, EditAnywhere, Category = Settings, meta = (
 		ConfigRestartRequired = true
 		))
@@ -45,6 +46,7 @@ class VRM4U_API UVrmRuntimeSettings : public UObject
 	bool bSkipValidationOnImport = false;
 
 	/** priority<100 for VRM4U. Default plugins priority=100 */
+	/** Additional file extensions accepted by the VRM4U importer. */
 	UPROPERTY(config, EditAnywhere, Category = Settings, meta = (
 		ConfigRestartRequired = true
 		))
