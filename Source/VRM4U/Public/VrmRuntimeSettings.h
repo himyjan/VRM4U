@@ -46,7 +46,6 @@ class VRM4U_API UVrmRuntimeSettings : public UObject
 	bool bSkipValidationOnImport = false;
 
 	/** priority<100 for VRM4U. Default plugins priority=100 */
-	/** Additional file extensions accepted by the VRM4U importer. */
 	UPROPERTY(config, EditAnywhere, Category = Settings, meta = (
 		ConfigRestartRequired = true
 		))
