@@ -4,6 +4,12 @@ from toolset_registry.agent_skill import agent_skill
 
 
 _INSTRUCTIONS = (
+    "Before importing a VRM model, present the relevant material-type choices "
+    "and their intended rendering behavior. For a first trial, recommend "
+    "VRMIMT_MToonUnlit first and VRMIMT_SSSProfile second; explicitly recommend "
+    "VRMIMT_SSSProfile when the character will be combined with Unreal Engine "
+    "PBR-rendered surfaces. Do not silently choose a material type when the user "
+    "has not specified one.\n"
     "Inspect the imported VRM asset and its metadata before modifying generated assets.\n"
     "Preserve the source model and import settings so changes remain reproducible.\n"
     "Determine whether the asset follows VRM 0.x or VRM 1.0 conventions before "

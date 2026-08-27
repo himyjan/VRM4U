@@ -10,10 +10,6 @@ _INSTRUCTIONS = (
     "materials, but its native class does not construct or animate a character "
     "by itself. Inspect the concrete Blueprint or setup using it before treating "
     "it as a complete character actor.\n"
-    "VrmCineCameraActor is a CineCameraActor whose camera component is replaced "
-    "with VrmCineCameraComponent. Use it when VRM4U off-center projection or "
-    "related camera behavior is required; otherwise prefer a standard "
-    "CineCameraActor.\n"
     "VrmSceneCaptureComponent2D follows the level editor viewport associated "
     "with its world or Player 0's game view. It can obtain GBuffer-derived data "
     "such as base color, normal, and MRS, as well as scene-texture data such as "
@@ -53,8 +49,8 @@ _INSTRUCTIONS = (
 
 @agent_skill
 class VRM4UActorSkill(unreal.AgentSkill):
-    """Use when placing or configuring VRM4U model actors, cine cameras,
-    scene-capture components, viewport or screen-buffer capture, capture
-    filters, rim-light filters, or monitoring components."""
+    """Use when placing or configuring VRM4U model actors, scene-capture
+    components, viewport or screen-buffer capture, capture filters, rim-light
+    filters, or monitoring components."""
 
     instructions = _INSTRUCTIONS
