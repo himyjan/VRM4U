@@ -31,6 +31,10 @@ _INSTRUCTIONS = (
     "edge behavior, and priority. When multiple rim filters are present, inspect "
     "their priorities and remove obsolete registrations before judging the "
     "result.\n"
+    "To draw VRM4U outlines with BP_VrmOutlineComponent, add or attach it as a "
+    "child of the intended SkeletalMeshComponent. Confirm that it is attached "
+    "to the correct skeletal mesh, then verify the outline in the intended "
+    "viewport before tuning its appearance.\n"
     "Add VrmCameraCheckComponent to the actor responsible for camera-dependent "
     "processing. Use it when "
     "that processing must also react to camera movement while editing. Bind the "
@@ -51,6 +55,6 @@ _INSTRUCTIONS = (
 class VRM4UActorSkill(unreal.AgentSkill):
     """Use when placing or configuring VRM4U model actors, scene-capture
     components, viewport or screen-buffer capture, capture filters, rim-light
-    filters, or monitoring components."""
+    filters, outline components, or monitoring components."""
 
     instructions = _INSTRUCTIONS
