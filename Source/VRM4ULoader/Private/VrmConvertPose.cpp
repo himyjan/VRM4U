@@ -184,9 +184,20 @@ namespace {
 		FString VrmPoseName;
 	};
 
+	struct FMetaHumanCurveContribution {
+		FString MetaHumanCurveName;
+		FString PerfectSyncPoseName;
+		float Weight;
+	};
+
 	struct FPreviewMorphCurve {
 		FString MorphTargetName;
 		TMap<int32, float> ValuesByPose;
+	};
+
+	struct FMetaHumanPoseFrame {
+		FString CurveName;
+		int32 PoseIndex;
 	};
 
 	static FString FindSkeletalMeshMorphTargetName(const USkeletalMesh* SkeletalMesh, const FString& MorphTargetName) {
@@ -218,6 +229,75 @@ namespace {
 		}
 
 		PreviewCurve->ValuesByPose.Add(PoseIndex, Value);
+	}
+
+	static void AddMetaHumanMarkerCurves(
+		UAnimSequence* Animation,
+		USkeleton* Skeleton,
+		const TArray<FMetaHumanPoseFrame>& MetaHumanPoseFrames,
+		int32 PoseCount) {
+		if (Animation == nullptr || Skeleton == nullptr || MetaHumanPoseFrames.Num() == 0 || PoseCount <= 0) {
+			return;
+		}
+
+#if UE_VERSION_OLDER_THAN(5,2,0)
+#if UE_VERSION_OLDER_THAN(5,0,0)
+#else
+		IAnimationDataController& MarkerDataController = Animation->GetController();
+		IAnimationDataController::FScopedBracket MarkerScopedBracket(&MarkerDataController, FText());
+#endif
+		for (const FMetaHumanPoseFrame& PoseFrame : MetaHumanPoseFrames) {
+			auto CurveName = GetUniquePoseName(Skeleton, PoseFrame.CurveName, true);
+			Animation->RawCurveData.AddCurveData(CurveName);
+			FFloatCurve* MarkerCurve = Animation->RawCurveData.FloatCurves.FindByPredicate(
+				[&CurveName](const FFloatCurve& Curve) {
+					return Curve.Name.DisplayName == CurveName.DisplayName;
+				});
+			if (MarkerCurve == nullptr) {
+				continue;
+			}
+
+			MarkerCurve->SetCurveTypeFlag(AACF_Editable, true);
+			for (int32 FrameIndex = 0; FrameIndex < PoseCount; ++FrameIndex) {
+				MarkerCurve->UpdateOrAddKey(FrameIndex == PoseFrame.PoseIndex ? 1.f : 0.f, static_cast<float>(FrameIndex));
+			}
+
+#if UE_VERSION_OLDER_THAN(5,0,0)
+#else
+			const FAnimationCurveIdentifier CurveId(CurveName, ERawCurveTrackTypes::RCT_Float);
+			MarkerDataController.AddCurve(CurveId);
+			MarkerDataController.SetCurveKeys(CurveId, MarkerCurve->FloatCurve.GetConstRefOfKeys());
+#endif
+		}
+#if UE_VERSION_OLDER_THAN(5,0,0)
+#else
+		MarkerDataController.UpdateCurveNamesFromSkeleton(Skeleton, ERawCurveTrackTypes::RCT_Float);
+		MarkerDataController.NotifyPopulated();
+#endif
+#else
+		IAnimationDataController& MarkerDataController = Animation->GetController();
+		IAnimationDataController::FScopedBracket MarkerScopedBracket(&MarkerDataController, FText());
+		for (const FMetaHumanPoseFrame& PoseFrame : MetaHumanPoseFrames) {
+			const FName CurveName = GetUniquePoseName(Skeleton, PoseFrame.CurveName, true);
+			const FAnimationCurveIdentifier CurveId(CurveName, ERawCurveTrackTypes::RCT_Float);
+			MarkerDataController.AddCurve(CurveId);
+			MarkerDataController.SetCurveFlag(CurveId, AACF_Editable, true);
+
+			TArray<FRichCurveKey> CurveKeys;
+			CurveKeys.Reserve(PoseCount);
+			for (int32 FrameIndex = 0; FrameIndex < PoseCount; ++FrameIndex) {
+				FRichCurveKey& Key = CurveKeys.Emplace_GetRef(
+					static_cast<float>(FrameIndex),
+					FrameIndex == PoseFrame.PoseIndex ? 1.f : 0.f);
+				Key.InterpMode = RCIM_Constant;
+			}
+			MarkerDataController.SetCurveKeys(CurveId, CurveKeys);
+		}
+#if UE_VERSION_OLDER_THAN(5,3,0)
+		MarkerDataController.UpdateCurveNamesFromSkeleton(Skeleton, ERawCurveTrackTypes::RCT_Float);
+#endif
+		MarkerDataController.NotifyPopulated();
+#endif
 	}
 
 	static void CreateFacePreviewAnimation(
@@ -449,6 +529,80 @@ namespace {
 		return Mappings;
 	}
 
+	static const TArray<FMetaHumanCurveContribution>& GetMetaHumanCurveContributions() {
+		// Keep these normalized semantic contributions local so generated PoseAssets do not depend on MetaHuman plugins or assets.
+		static const TArray<FMetaHumanCurveContribution> Contributions = {
+			{TEXT("CTRL_expressions_eyeBlinkL"), TEXT("EyeBlinkLeft"), 1.f},
+			{TEXT("CTRL_expressions_eyeLookDownL"), TEXT("EyeLookDownLeft"), 1.f},
+			{TEXT("CTRL_expressions_eyeLookRightL"), TEXT("EyeLookInLeft"), 1.f},
+			{TEXT("CTRL_expressions_eyeLookLeftL"), TEXT("EyeLookOutLeft"), 1.f},
+			{TEXT("CTRL_expressions_eyeLookUpL"), TEXT("EyeLookUpLeft"), 1.f},
+			{TEXT("CTRL_expressions_eyeSquintInnerL"), TEXT("EyeSquintLeft"), 1.f},
+			{TEXT("CTRL_expressions_eyeWidenL"), TEXT("EyeWideLeft"), 1.f},
+			{TEXT("CTRL_expressions_eyeBlinkR"), TEXT("EyeBlinkRight"), 1.f},
+			{TEXT("CTRL_expressions_eyeLookDownR"), TEXT("EyeLookDownRight"), 1.f},
+			{TEXT("CTRL_expressions_eyeLookLeftR"), TEXT("EyeLookInRight"), 1.f},
+			{TEXT("CTRL_expressions_eyeLookRightR"), TEXT("EyeLookOutRight"), 1.f},
+			{TEXT("CTRL_expressions_eyeLookUpR"), TEXT("EyeLookUpRight"), 1.f},
+			{TEXT("CTRL_expressions_eyeSquintInnerR"), TEXT("EyeSquintRight"), 1.f},
+			{TEXT("CTRL_expressions_eyeWidenR"), TEXT("EyeWideRight"), 1.f},
+			{TEXT("CTRL_expressions_jawFwd"), TEXT("JawForward"), 1.f},
+			{TEXT("CTRL_expressions_jawLeft"), TEXT("JawLeft"), 1.f},
+			{TEXT("CTRL_expressions_jawRight"), TEXT("JawRight"), 1.f},
+			{TEXT("CTRL_expressions_jawOpen"), TEXT("JawOpen"), 1.f},
+			{TEXT("CTRL_expressions_mouthLipsTogetherUL"), TEXT("MouthClose"), 0.25f},
+			{TEXT("CTRL_expressions_mouthLipsTogetherUR"), TEXT("MouthClose"), 0.25f},
+			{TEXT("CTRL_expressions_mouthLipsTogetherDL"), TEXT("MouthClose"), 0.25f},
+			{TEXT("CTRL_expressions_mouthLipsTogetherDR"), TEXT("MouthClose"), 0.25f},
+			{TEXT("CTRL_expressions_mouthFunnelUL"), TEXT("MouthFunnel"), 0.25f},
+			{TEXT("CTRL_expressions_mouthFunnelUR"), TEXT("MouthFunnel"), 0.25f},
+			{TEXT("CTRL_expressions_mouthFunnelDL"), TEXT("MouthFunnel"), 0.25f},
+			{TEXT("CTRL_expressions_mouthFunnelDR"), TEXT("MouthFunnel"), 0.25f},
+			{TEXT("CTRL_expressions_mouthLipsPurseUL"), TEXT("MouthPucker"), 0.25f},
+			{TEXT("CTRL_expressions_mouthLipsPurseUR"), TEXT("MouthPucker"), 0.25f},
+			{TEXT("CTRL_expressions_mouthLipsPurseDL"), TEXT("MouthPucker"), 0.25f},
+			{TEXT("CTRL_expressions_mouthLipsPurseDR"), TEXT("MouthPucker"), 0.25f},
+			{TEXT("CTRL_expressions_mouthLeft"), TEXT("MouthLeft"), 1.f},
+			{TEXT("CTRL_expressions_mouthRight"), TEXT("MouthRight"), 1.f},
+			{TEXT("CTRL_expressions_mouthCornerPullL"), TEXT("MouthSmileLeft"), 1.f},
+			{TEXT("CTRL_expressions_mouthCornerPullR"), TEXT("MouthSmileRight"), 1.f},
+			{TEXT("CTRL_expressions_mouthCornerDepressL"), TEXT("MouthFrownLeft"), 1.f},
+			{TEXT("CTRL_expressions_mouthCornerDepressR"), TEXT("MouthFrownRight"), 1.f},
+			{TEXT("CTRL_expressions_mouthDimpleL"), TEXT("MouthDimpleLeft"), 1.f},
+			{TEXT("CTRL_expressions_mouthDimpleR"), TEXT("MouthDimpleRight"), 1.f},
+			{TEXT("CTRL_expressions_mouthStretchL"), TEXT("MouthStretchLeft"), 1.f},
+			{TEXT("CTRL_expressions_mouthStretchR"), TEXT("MouthStretchRight"), 1.f},
+			{TEXT("CTRL_expressions_mouthLowerLipRollInL"), TEXT("MouthRollLower"), 0.5f},
+			{TEXT("CTRL_expressions_mouthLowerLipRollInR"), TEXT("MouthRollLower"), 0.5f},
+			{TEXT("CTRL_expressions_mouthUpperLipRollInL"), TEXT("MouthRollUpper"), 0.5f},
+			{TEXT("CTRL_expressions_mouthUpperLipRollInR"), TEXT("MouthRollUpper"), 0.5f},
+			{TEXT("CTRL_expressions_mouthLowerLipTowardsTeethL"), TEXT("MouthShrugLower"), 0.5f},
+			{TEXT("CTRL_expressions_mouthLowerLipTowardsTeethR"), TEXT("MouthShrugLower"), 0.5f},
+			{TEXT("CTRL_expressions_mouthUpperLipTowardsTeethL"), TEXT("MouthShrugUpper"), 0.5f},
+			{TEXT("CTRL_expressions_mouthUpperLipTowardsTeethR"), TEXT("MouthShrugUpper"), 0.5f},
+			{TEXT("CTRL_expressions_mouthLipsPressL"), TEXT("MouthPressLeft"), 1.f},
+			{TEXT("CTRL_expressions_mouthLipsPressR"), TEXT("MouthPressRight"), 1.f},
+			{TEXT("CTRL_expressions_mouthLowerLipDepressL"), TEXT("MouthLowerDownLeft"), 1.f},
+			{TEXT("CTRL_expressions_mouthLowerLipDepressR"), TEXT("MouthLowerDownRight"), 1.f},
+			{TEXT("CTRL_expressions_mouthUpperLipRaiseL"), TEXT("MouthUpperUpLeft"), 1.f},
+			{TEXT("CTRL_expressions_mouthUpperLipRaiseR"), TEXT("MouthUpperUpRight"), 1.f},
+			{TEXT("CTRL_expressions_browDownL"), TEXT("BrowDownLeft"), 1.f},
+			{TEXT("CTRL_expressions_browDownR"), TEXT("BrowDownRight"), 1.f},
+			{TEXT("CTRL_expressions_browRaiseInL"), TEXT("BrowInnerUp"), 0.5f},
+			{TEXT("CTRL_expressions_browRaiseInR"), TEXT("BrowInnerUp"), 0.5f},
+			{TEXT("CTRL_expressions_browRaiseOuterL"), TEXT("BrowOuterUpLeft"), 1.f},
+			{TEXT("CTRL_expressions_browRaiseOuterR"), TEXT("BrowOuterUpRight"), 1.f},
+			{TEXT("CTRL_expressions_mouthCheekBlowL"), TEXT("CheekPuff"), 0.5f},
+			{TEXT("CTRL_expressions_mouthCheekBlowR"), TEXT("CheekPuff"), 0.5f},
+			{TEXT("CTRL_expressions_eyeCheekRaiseL"), TEXT("CheekSquintLeft"), 1.f},
+			{TEXT("CTRL_expressions_eyeCheekRaiseR"), TEXT("CheekSquintRight"), 1.f},
+			{TEXT("CTRL_expressions_noseWrinkleL"), TEXT("NoseSneerLeft"), 1.f},
+			{TEXT("CTRL_expressions_noseWrinkleR"), TEXT("NoseSneerRight"), 1.f},
+			{TEXT("CTRL_expressions_tongueOut"), TEXT("TongueOut"), 1.f},
+		};
+		return Contributions;
+	}
+
 #if UE_VERSION_OLDER_THAN(5,3,0)
 	static int32 FindPoseIndexByName(const TArray<FSmartName>& PoseNames, const FString& PoseName) {
 		const FSmartName* FoundPoseName = PoseNames.FindByPredicate(
@@ -529,6 +683,7 @@ namespace {
 		TArray < FName > SmartNamePoseList;
 #endif
 		TArray<FPreviewMorphCurve> PreviewMorphCurves;
+		TArray<FMetaHumanPoseFrame> MetaHumanPoseFrames;
 		{
 			auto n = GetUniquePoseName(k, TEXT("DefaultRefPose"), true);
 			SmartNamePoseList.Add(n);
@@ -608,82 +763,174 @@ namespace {
 				return c.GetName();
 			};
 #endif
-			// Perfect Sync (ARKit) blend shapes and Live Link rotation curves.
-			const TArray<FPerfectSyncMorphMapping> PerfectSyncMappings = BuildPerfectSyncMorphMappings(MorphNameList);
-			for (const FPerfectSyncMorphMapping& Mapping : PerfectSyncMappings) {
-				const FString& PerfectSyncPoseName = Mapping.PoseName;
-				const FString& ModelMorphName = Mapping.MorphTargetName;
-				const int32 PoseIndex = SmartNamePoseList.Num();
-				SetPreviewMorphValue(
-					PreviewMorphCurves,
-					FindSkeletalMeshMorphTargetName(sk, ModelMorphName),
-					PoseIndex,
-					1.f);
+			auto AddPerfectSyncPoses = [&]() {
+				// Perfect Sync (ARKit) blend shapes and Live Link rotation curves.
+				const TArray<FPerfectSyncMorphMapping> PerfectSyncMappings = BuildPerfectSyncMorphMappings(MorphNameList);
+				for (const FPerfectSyncMorphMapping& Mapping : PerfectSyncMappings) {
+					const FString& PerfectSyncPoseName = Mapping.PoseName;
+					const FString& ModelMorphName = Mapping.MorphTargetName;
+					const int32 PoseIndex = SmartNamePoseList.Num();
+					SetPreviewMorphValue(
+						PreviewMorphCurves,
+						FindSkeletalMeshMorphTargetName(sk, ModelMorphName),
+						PoseIndex,
+						1.f);
 
-				auto SmartPoseName = GetUniquePoseName(k, *PerfectSyncPoseName, true);
-				auto curveName = GetUniquePoseName(nullptr, "");
+					auto SmartPoseName = GetUniquePoseName(k, *PerfectSyncPoseName, true);
+					auto curveName = GetUniquePoseName(nullptr, "");
 
-				int targetNo = 0;
-				bool bSameName = false;
-				if (PerfectSyncPoseName.Equals(ModelMorphName, ESearchCase::IgnoreCase)) {
-					// same name. no curve weight
-					curveName = SmartPoseName;
-					bSameName = true;
-				} else if (ModelMorphName.IsEmpty()) {
-					// no morph. norcurve weight
-					curveName = SmartPoseName;
-					bSameName = true;
-				} else {
-					bool bFind = false;
-					for (decltype(auto) c : GetCurves()) {
-						if (GetCurveName(c).ToString().Equals(ModelMorphName, ESearchCase::IgnoreCase)) {
-							// found curve in list
-							bFind = true;
-							curveName = GetCurveSmartName(c);
-							break;
+					int targetNo = 0;
+					bool bSameName = false;
+					if (PerfectSyncPoseName.Equals(ModelMorphName, ESearchCase::IgnoreCase)) {
+						// same name. no curve weight
+						curveName = SmartPoseName;
+						bSameName = true;
+					} else if (ModelMorphName.IsEmpty()) {
+						// no morph. norcurve weight
+						curveName = SmartPoseName;
+						bSameName = true;
+					} else {
+						bool bFind = false;
+						for (decltype(auto) c : GetCurves()) {
+							if (GetCurveName(c).ToString().Equals(ModelMorphName, ESearchCase::IgnoreCase)) {
+								// found curve in list
+								bFind = true;
+								curveName = GetCurveSmartName(c);
+								break;
+							}
+							++targetNo;
 						}
-						++targetNo;
+						if (bFind == false) {
+							// create new curve
+							curveName = GetUniquePoseName(k, *ModelMorphName, true);
+							targetNo = GetCurves().Num();
+						}
 					}
-					if (bFind == false) {
-						// create new curve
-						curveName = GetUniquePoseName(k, *ModelMorphName, true);
-						targetNo = GetCurves().Num();
-					}
-				}
 #if UE_VERSION_OLDER_THAN(5,2,0)
-				ase->RawCurveData.AddCurveData(curveName);
+					ase->RawCurveData.AddCurveData(curveName);
 #else
-				FAnimationCurveIdentifier id(curveName, ERawCurveTrackTypes::RCT_Float);
-				DataController.AddCurve(id);
+					FAnimationCurveIdentifier id(curveName, ERawCurveTrackTypes::RCT_Float);
+					DataController.AddCurve(id);
 #endif
 
-				// Anim to Pose
-				if (bSameName == false) {
-					decltype(auto) c = GetCurves();
-					auto& a = c[targetNo];
+					// Anim to Pose
+					if (bSameName == false) {
+						decltype(auto) c = GetCurves();
+						auto& a = c[targetNo];
 
-					a.SetCurveTypeFlag(AACF_Editable, true);
+						a.SetCurveTypeFlag(AACF_Editable, true);
 
-					// 0 for prev and forward frame
-					if (a.Evaluate(PoseIndex - 1) == 0) {
-						a.UpdateOrAddKey(0, PoseIndex - 1);
-					}
-					if (a.Evaluate(PoseIndex + 1) == 0) {
-						a.UpdateOrAddKey(0, PoseIndex + 1);
-					}
-					a.UpdateOrAddKey(1, PoseIndex);
+						// 0 for prev and forward frame
+						if (a.Evaluate(PoseIndex - 1) == 0) {
+							a.UpdateOrAddKey(0, PoseIndex - 1);
+						}
+						if (a.Evaluate(PoseIndex + 1) == 0) {
+							a.UpdateOrAddKey(0, PoseIndex + 1);
+						}
+						a.UpdateOrAddKey(1, PoseIndex);
 
 #if UE_VERSION_OLDER_THAN(5,0,0)
 #else
-					FAnimationCurveIdentifier CurveId(curveName, ERawCurveTrackTypes::RCT_Float);
-					DataController.AddCurve(CurveId);
-					DataController.SetCurveKeys(CurveId, a.FloatCurve.GetConstRefOfKeys());
+						FAnimationCurveIdentifier CurveId(curveName, ERawCurveTrackTypes::RCT_Float);
+						DataController.AddCurve(CurveId);
+						DataController.SetCurveKeys(CurveId, a.FloatCurve.GetConstRefOfKeys());
 #endif
+					}
+					auto newName = SmartPoseName;
+					SmartNamePoseList.Add(newName);
 				}
-				auto newName = SmartPoseName;
-				SmartNamePoseList.Add(newName);
-			}
+			};
 
+			auto AddMetaHumanPoses = [&]() {
+				const TArray<FMetaHumanCurveContribution>& Contributions = GetMetaHumanCurveContributions();
+				TArray<FString> MetaHumanCurveNames;
+				for (const FMetaHumanCurveContribution& Contribution : Contributions) {
+					MetaHumanCurveNames.AddUnique(Contribution.MetaHumanCurveName);
+				}
+
+				for (const FString& MetaHumanCurveName : MetaHumanCurveNames) {
+					bool bHasTargetMorph = false;
+					for (const FMetaHumanCurveContribution& Contribution : Contributions) {
+						if (Contribution.MetaHumanCurveName != MetaHumanCurveName) {
+							continue;
+						}
+
+						const FString PerfectSyncMorphName = FindPerfectSyncMorphTarget(Contribution.PerfectSyncPoseName, MorphNameList);
+						if (FindSkeletalMeshMorphTargetName(sk, PerfectSyncMorphName).IsEmpty() == false) {
+							bHasTargetMorph = true;
+							break;
+						}
+					}
+					if (bHasTargetMorph == false) {
+						continue;
+					}
+
+					const int32 PoseIndex = SmartNamePoseList.Num();
+					auto SmartPoseName = GetUniquePoseName(k, MetaHumanCurveName, true);
+
+					for (const FMetaHumanCurveContribution& Contribution : Contributions) {
+						if (Contribution.MetaHumanCurveName != MetaHumanCurveName) {
+							continue;
+						}
+
+						const FString PerfectSyncMorphName = FindPerfectSyncMorphTarget(Contribution.PerfectSyncPoseName, MorphNameList);
+						const FString ModelMorphName = FindSkeletalMeshMorphTargetName(sk, PerfectSyncMorphName);
+						if (ModelMorphName.IsEmpty()) {
+							continue;
+						}
+
+						auto curveName = GetUniquePoseName(nullptr, "");
+						int32 TargetCurveIndex = 0;
+						bool bFoundCurve = false;
+						for (decltype(auto) Curve : GetCurves()) {
+							if (GetCurveName(Curve).ToString().Equals(ModelMorphName, ESearchCase::IgnoreCase)) {
+								curveName = GetCurveSmartName(Curve);
+								bFoundCurve = true;
+								break;
+							}
+							++TargetCurveIndex;
+						}
+						if (bFoundCurve == false) {
+							curveName = GetUniquePoseName(k, ModelMorphName, true);
+							TargetCurveIndex = GetCurves().Num();
+						}
+
+#if UE_VERSION_OLDER_THAN(5,2,0)
+						ase->RawCurveData.AddCurveData(curveName);
+#else
+						const FAnimationCurveIdentifier AddedCurveId(curveName, ERawCurveTrackTypes::RCT_Float);
+						DataController.AddCurve(AddedCurveId);
+#endif
+
+						decltype(auto) Curves = GetCurves();
+						auto& Curve = Curves[TargetCurveIndex];
+						Curve.SetCurveTypeFlag(AACF_Editable, true);
+						if (Curve.Evaluate(PoseIndex - 1) == 0) {
+							Curve.UpdateOrAddKey(0, PoseIndex - 1);
+						}
+						if (Curve.Evaluate(PoseIndex + 1) == 0) {
+							Curve.UpdateOrAddKey(0, PoseIndex + 1);
+						}
+						Curve.UpdateOrAddKey(Contribution.Weight, PoseIndex);
+
+#if UE_VERSION_OLDER_THAN(5,0,0)
+#else
+						const FAnimationCurveIdentifier CurveId(curveName, ERawCurveTrackTypes::RCT_Float);
+						DataController.AddCurve(CurveId);
+						DataController.SetCurveKeys(CurveId, Curve.FloatCurve.GetConstRefOfKeys());
+#endif
+
+						SetPreviewMorphValue(
+							PreviewMorphCurves,
+							ModelMorphName,
+							PoseIndex,
+							Contribution.Weight);
+					}
+
+					MetaHumanPoseFrames.Add({MetaHumanCurveName, PoseIndex});
+					SmartNamePoseList.Add(SmartPoseName);
+				}
+			};
 
 			// vrm blendshape
 			{
@@ -807,6 +1054,9 @@ namespace {
 				}
 			}
 
+			AddPerfectSyncPoses();
+			AddMetaHumanPoses();
+
 			// Use the nearest VRM expression when a model has no direct Perfect Sync morph.
 			{
 				for (const FPerfectSyncFallbackMapping& FallbackMapping : GetPerfectSyncFallbackMappings()) {
@@ -925,6 +1175,7 @@ namespace {
 			pose->ConvertSpace(true, 0);
 
 		}
+		AddMetaHumanMarkerCurves(ase, k, MetaHumanPoseFrames, SmartNamePoseList.Num());
 		CreateFacePreviewAnimation(vrmAssetList, sk, k, PreviewMorphCurves, SmartNamePoseList.Num());
 #if	UE_VERSION_OLDER_THAN(5,0,0)
 		ase->PreSave(nullptr);
