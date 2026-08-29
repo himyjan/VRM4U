@@ -174,8 +174,146 @@ namespace {
 #endif 
 
 #if WITH_EDITOR
-	static void localFaceMorphConv(UVrmAssetListObject* vrmAssetList, const aiScene* aiData) {
-		const TArray<FString> arkitMorphName = {
+	struct FPerfectSyncMorphMapping {
+		FString PoseName;
+		FString MorphTargetName;
+	};
+
+	struct FPerfectSyncFallbackMapping {
+		FString PerfectSyncPoseName;
+		FString VrmPoseName;
+	};
+
+	struct FPreviewMorphCurve {
+		FString MorphTargetName;
+		TMap<int32, float> ValuesByPose;
+	};
+
+	static FString FindSkeletalMeshMorphTargetName(const USkeletalMesh* SkeletalMesh, const FString& MorphTargetName) {
+		if (SkeletalMesh == nullptr || MorphTargetName.IsEmpty()) {
+			return FString();
+		}
+
+		for (const auto& MorphTarget : SkeletalMesh->GetMorphTargets()) {
+			if (MorphTarget && MorphTarget->GetName().Equals(MorphTargetName, ESearchCase::IgnoreCase)) {
+				return MorphTarget->GetName();
+			}
+		}
+
+		return FString();
+	}
+
+	static void SetPreviewMorphValue(TArray<FPreviewMorphCurve>& PreviewMorphCurves, const FString& MorphTargetName, int32 PoseIndex, float Value) {
+		if (MorphTargetName.IsEmpty() || PoseIndex < 0) {
+			return;
+		}
+
+		FPreviewMorphCurve* PreviewCurve = PreviewMorphCurves.FindByPredicate(
+			[&MorphTargetName](const FPreviewMorphCurve& Curve) {
+				return Curve.MorphTargetName.Equals(MorphTargetName, ESearchCase::IgnoreCase);
+			});
+		if (PreviewCurve == nullptr) {
+			PreviewCurve = &PreviewMorphCurves.AddDefaulted_GetRef();
+			PreviewCurve->MorphTargetName = MorphTargetName;
+		}
+
+		PreviewCurve->ValuesByPose.Add(PoseIndex, Value);
+	}
+
+	static void CreateFacePreviewAnimation(
+		UVrmAssetListObject* VrmAssetList,
+		USkeletalMesh* SkeletalMesh,
+		USkeleton* Skeleton,
+		const TArray<FPreviewMorphCurve>& PreviewMorphCurves,
+		int32 PoseCount) {
+		if (VrmAssetList == nullptr || SkeletalMesh == nullptr || Skeleton == nullptr || PoseCount <= 0) {
+			return;
+		}
+
+		const FString PreviewAnimName = FString(TEXT("A_face_preview_")) + VrmAssetList->BaseFileName;
+		UAnimSequence* PreviewAnimation = VRM4U_NewObject<UAnimSequence>(
+			VrmAssetList->Package,
+			*PreviewAnimName,
+			RF_Public | RF_Standalone);
+		PreviewAnimation->SetSkeleton(Skeleton);
+		PreviewAnimation->RateScale = 24.f;
+
+#if UE_VERSION_OLDER_THAN(5,0,0)
+		PreviewAnimation->CleanAnimSequenceForImport();
+#elif UE_VERSION_OLDER_THAN(5,2,0)
+		IAnimationDataController& PreviewDataController = PreviewAnimation->GetController();
+		IAnimationDataController::FScopedBracket PreviewScopedBracket(&PreviewDataController, FText());
+		PreviewDataController.ResetModel();
+#else
+		IAnimationDataController& PreviewDataController = PreviewAnimation->GetController();
+		IAnimationDataController::FScopedBracket PreviewScopedBracket(&PreviewDataController, FText());
+		PreviewDataController.ResetModel();
+		PreviewDataController.InitializeModel();
+		PreviewDataController.NotifyPopulated();
+		PreviewDataController.SetFrameRate(FFrameRate(1, 1));
+		PreviewDataController.SetNumberOfFrames(PoseCount - 1);
+		PreviewDataController.UpdateWithSkeleton(Skeleton);
+#endif
+
+		for (const FPreviewMorphCurve& PreviewMorphCurve : PreviewMorphCurves) {
+			auto CurveName = GetUniquePoseName(Skeleton, PreviewMorphCurve.MorphTargetName, true);
+
+#if UE_VERSION_OLDER_THAN(5,2,0)
+			PreviewAnimation->RawCurveData.AddCurveData(CurveName);
+			FFloatCurve& Curve = PreviewAnimation->RawCurveData.FloatCurves.Last();
+			Curve.SetCurveTypeFlag(AACF_Editable, true);
+#if UE_VERSION_OLDER_THAN(5,0,0)
+			Curve.SetCurveTypeFlag(AACF_DriveMorphTarget, true);
+#else
+			Skeleton->SetCurveMetaDataMorphTarget(CurveName.DisplayName, true);
+#endif
+			for (int32 PoseIndex = 0; PoseIndex < PoseCount; ++PoseIndex) {
+				const float* Value = PreviewMorphCurve.ValuesByPose.Find(PoseIndex);
+				Curve.UpdateOrAddKey(Value ? *Value : 0.f, static_cast<float>(PoseIndex));
+			}
+#else
+			Skeleton->SetCurveMetaDataMorphTarget(CurveName, true);
+			const FAnimationCurveIdentifier CurveId(CurveName, ERawCurveTrackTypes::RCT_Float);
+			PreviewDataController.AddCurve(CurveId);
+			PreviewDataController.SetCurveFlag(CurveId, AACF_Editable, true);
+
+			TArray<FRichCurveKey> CurveKeys;
+			CurveKeys.Reserve(PoseCount);
+			for (int32 PoseIndex = 0; PoseIndex < PoseCount; ++PoseIndex) {
+				const float* Value = PreviewMorphCurve.ValuesByPose.Find(PoseIndex);
+				FRichCurveKey& Key = CurveKeys.Emplace_GetRef(static_cast<float>(PoseIndex), Value ? *Value : 0.f);
+				Key.InterpMode = RCIM_Constant;
+			}
+			PreviewDataController.SetCurveKeys(CurveId, CurveKeys);
+#endif
+		}
+
+#if UE_VERSION_OLDER_THAN(4,22,0)
+		PreviewAnimation->NumFrames = PoseCount;
+#elif UE_VERSION_OLDER_THAN(5,0,0)
+		PreviewAnimation->SetRawNumberOfFrame(PoseCount);
+#endif
+
+#if UE_VERSION_OLDER_THAN(5,0,0)
+		PreviewAnimation->SequenceLength = static_cast<float>(PoseCount - 1);
+#elif UE_VERSION_OLDER_THAN(5,2,0)
+		PreviewDataController.SetPlayLength(static_cast<float>(PoseCount - 1));
+		PreviewDataController.SetFrameRate(FFrameRate(1, 1));
+		PreviewDataController.UpdateCurveNamesFromSkeleton(Skeleton, ERawCurveTrackTypes::RCT_Float);
+		PreviewDataController.NotifyPopulated();
+#else
+		PreviewAnimation->SetPreviewMesh(SkeletalMesh);
+		PreviewDataController.NotifyPopulated();
+#endif
+
+#if UE_VERSION_OLDER_THAN(5,0,0)
+		PreviewAnimation->PreSave(nullptr);
+#endif
+		PreviewAnimation->PostEditChange();
+	}
+
+	static const TArray<FString>& GetPerfectSyncPoseNames() {
+		static const TArray<FString> PoseNames = {
 			// Left eye blend shapes
 			TEXT("EyeBlinkLeft"),
 			TEXT("EyeLookDownLeft"),
@@ -247,6 +385,89 @@ namespace {
 			TEXT("RightEyePitch"),
 			TEXT("RightEyeRoll"),
 		};
+		return PoseNames;
+	}
+
+	static FString FindPerfectSyncMorphTarget(const FString& PerfectSyncPoseName, const TArray<FString>& MorphNameList) {
+		const FString* ExactMatch = MorphNameList.FindByPredicate(
+			[&PerfectSyncPoseName](const FString& MorphName) {
+				return MorphName.Equals(PerfectSyncPoseName, ESearchCase::CaseSensitive);
+			});
+		if (ExactMatch) {
+			return *ExactMatch;
+		}
+
+		const FString* CaseInsensitiveMatch = MorphNameList.FindByPredicate(
+			[&PerfectSyncPoseName](const FString& MorphName) {
+				return MorphName.Equals(PerfectSyncPoseName, ESearchCase::IgnoreCase);
+			});
+		if (CaseInsensitiveMatch) {
+			return *CaseInsensitiveMatch;
+		}
+
+		TArray<FString> AliasNames;
+		AliasNames.Add(PerfectSyncPoseName.Replace(TEXT("Left"), TEXT("_L"), ESearchCase::CaseSensitive));
+		AliasNames.Add(PerfectSyncPoseName.Replace(TEXT("Right"), TEXT("_R"), ESearchCase::CaseSensitive));
+
+		for (const FString& AliasName : AliasNames) {
+			if (AliasName == PerfectSyncPoseName) {
+				continue;
+			}
+			const FString* AliasMatch = MorphNameList.FindByPredicate(
+				[&AliasName](const FString& MorphName) {
+					return MorphName.Equals(AliasName, ESearchCase::IgnoreCase);
+				});
+			if (AliasMatch) {
+				return *AliasMatch;
+			}
+		}
+
+		return FString();
+	}
+
+	static TArray<FPerfectSyncMorphMapping> BuildPerfectSyncMorphMappings(const TArray<FString>& MorphNameList) {
+		TArray<FPerfectSyncMorphMapping> Mappings;
+		const TArray<FString>& PerfectSyncPoseNames = GetPerfectSyncPoseNames();
+		Mappings.Reserve(PerfectSyncPoseNames.Num());
+
+		for (const FString& PoseName : PerfectSyncPoseNames) {
+			FPerfectSyncMorphMapping Mapping;
+			Mapping.PoseName = PoseName;
+			Mapping.MorphTargetName = FindPerfectSyncMorphTarget(PoseName, MorphNameList);
+			Mappings.Add(Mapping);
+		}
+
+		return Mappings;
+	}
+
+	static const TArray<FPerfectSyncFallbackMapping>& GetPerfectSyncFallbackMappings() {
+		static const TArray<FPerfectSyncFallbackMapping> Mappings = {
+			{TEXT("EyeBlinkLeft"), TEXT("Blink_L")},
+			{TEXT("EyeBlinkRight"), TEXT("Blink_R")},
+			{TEXT("JawOpen"), TEXT("A")},
+		};
+		return Mappings;
+	}
+
+#if UE_VERSION_OLDER_THAN(5,3,0)
+	static int32 FindPoseIndexByName(const TArray<FSmartName>& PoseNames, const FString& PoseName) {
+		const FSmartName* FoundPoseName = PoseNames.FindByPredicate(
+			[&PoseName](const FSmartName& Name) {
+				return Name.DisplayName.ToString().Equals(PoseName, ESearchCase::IgnoreCase);
+			});
+		return FoundPoseName ? PoseNames.Find(*FoundPoseName) : INDEX_NONE;
+	}
+#else
+	static int32 FindPoseIndexByName(const TArray<FName>& PoseNames, const FString& PoseName) {
+		const FName* FoundPoseName = PoseNames.FindByPredicate(
+			[&PoseName](const FName& Name) {
+				return Name.ToString().Equals(PoseName, ESearchCase::IgnoreCase);
+			});
+		return FoundPoseName ? PoseNames.Find(*FoundPoseName) : INDEX_NONE;
+	}
+#endif
+
+	static void localFaceMorphConv(UVrmAssetListObject* vrmAssetList, const aiScene* aiData) {
 
 		FString name = FString(TEXT("POSE_face_")) + vrmAssetList->BaseFileName;
 
@@ -307,6 +528,7 @@ namespace {
 #else
 		TArray < FName > SmartNamePoseList;
 #endif
+		TArray<FPreviewMorphCurve> PreviewMorphCurves;
 		{
 			auto n = GetUniquePoseName(k, TEXT("DefaultRefPose"), true);
 			SmartNamePoseList.Add(n);
@@ -386,64 +608,35 @@ namespace {
 				return c.GetName();
 			};
 #endif
-			// arkit blendshape
-			for (auto& arkitMorph : arkitMorphName) {
+			// Perfect Sync (ARKit) blend shapes and Live Link rotation curves.
+			const TArray<FPerfectSyncMorphMapping> PerfectSyncMappings = BuildPerfectSyncMorphMappings(MorphNameList);
+			for (const FPerfectSyncMorphMapping& Mapping : PerfectSyncMappings) {
+				const FString& PerfectSyncPoseName = Mapping.PoseName;
+				const FString& ModelMorphName = Mapping.MorphTargetName;
+				const int32 PoseIndex = SmartNamePoseList.Num();
+				SetPreviewMorphValue(
+					PreviewMorphCurves,
+					FindSkeletalMeshMorphTargetName(sk, ModelMorphName),
+					PoseIndex,
+					1.f);
 
-				int no = MorphNameList.Find(arkitMorph);
-
-				FString modelMorph;
-				if (no >= 0) {
-					modelMorph = arkitMorph;
-				} else {
-					auto ar = arkitMorph.ToLower();
-					FString* find_s = MorphNameList.FindByPredicate(
-						[&ar, &modelMorph](const FString& str) {
-						//
-						auto s = str.ToLower();
-						if (s == ar) {
-							modelMorph = str;
-							return true;
-						}
-						FString tmp;
-						tmp = ar.Replace(TEXT("Left"), TEXT("_L")).ToLower();
-						if (s == tmp) {
-							modelMorph = str;
-							return true;
-						}
-						tmp = ar.Replace(TEXT("Right"), TEXT("_R")).ToLower();
-						if (s == tmp) {
-							modelMorph = str;
-							return true;
-						}
-						return false;
-					}
-					);
-					if (find_s) {
-						no = MorphNameList.Find(*find_s);
-					}
-				}
-				// no morph. add no weight curve
-				//if (no < 0) {
-				//	continue;
-				//}
-
-				auto SmartPoseName = GetUniquePoseName(k, *arkitMorph, true);
+				auto SmartPoseName = GetUniquePoseName(k, *PerfectSyncPoseName, true);
 				auto curveName = GetUniquePoseName(nullptr, "");
 
 				int targetNo = 0;
 				bool bSameName = false;
-				if (arkitMorph == modelMorph) {
+				if (PerfectSyncPoseName.Equals(ModelMorphName, ESearchCase::IgnoreCase)) {
 					// same name. no curve weight
 					curveName = SmartPoseName;
 					bSameName = true;
-				} else if (modelMorph == "") {
+				} else if (ModelMorphName.IsEmpty()) {
 					// no morph. norcurve weight
 					curveName = SmartPoseName;
 					bSameName = true;
 				} else {
 					bool bFind = false;
 					for (decltype(auto) c : GetCurves()) {
-						if (GetCurveName(c).ToString().ToLower() == modelMorph.ToLower()) {
+						if (GetCurveName(c).ToString().Equals(ModelMorphName, ESearchCase::IgnoreCase)) {
 							// found curve in list
 							bFind = true;
 							curveName = GetCurveSmartName(c);
@@ -453,7 +646,7 @@ namespace {
 					}
 					if (bFind == false) {
 						// create new curve
-						curveName = GetUniquePoseName(k, *modelMorph, true);
+						curveName = GetUniquePoseName(k, *ModelMorphName, true);
 						targetNo = GetCurves().Num();
 					}
 				}
@@ -471,17 +664,14 @@ namespace {
 
 					a.SetCurveTypeFlag(AACF_Editable, true);
 
-					// for default +1
-					int targetFrame = GetCurves().Num() + 1;
-
 					// 0 for prev and forward frame
-					if (a.Evaluate(targetFrame - 2) == 0) {
-						a.UpdateOrAddKey(0, targetFrame - 2);
+					if (a.Evaluate(PoseIndex - 1) == 0) {
+						a.UpdateOrAddKey(0, PoseIndex - 1);
 					}
-					if (a.Evaluate(targetFrame + 0) == 0) {
-						a.UpdateOrAddKey(0, targetFrame + 0);
+					if (a.Evaluate(PoseIndex + 1) == 0) {
+						a.UpdateOrAddKey(0, PoseIndex + 1);
 					}
-					a.UpdateOrAddKey(1, targetFrame - 1);
+					a.UpdateOrAddKey(1, PoseIndex);
 
 #if UE_VERSION_OLDER_THAN(5,0,0)
 #else
@@ -497,15 +687,13 @@ namespace {
 
 			// vrm blendshape
 			{
-				// for add and offset
-				int targetFrame = GetCurves().Num() + 1 + 1;
-
 				for (auto& group : vrmAssetList->VrmMetaObject->BlendShapeGroup) {
 
 					if (group.name == "") continue;
 					if (group.BlendShape.Num() == 0) continue;
 
 					auto SmartPoseName = GetUniquePoseName(k, *group.name, true);
+					const int32 PoseIndex = SmartNamePoseList.Num();
 
 					// !! vrm blend shape !!
 					bool addCurve = false;
@@ -572,6 +760,12 @@ namespace {
 							}
 #endif
 						}
+
+						SetPreviewMorphValue(
+							PreviewMorphCurves,
+							FindSkeletalMeshMorphTargetName(sk, shape.morphTargetName),
+							PoseIndex,
+							static_cast<float>(shape.weight) / 100.f);
 						
 
 #if UE_VERSION_OLDER_THAN(5,2,0)
@@ -588,13 +782,13 @@ namespace {
 							a.SetCurveTypeFlag(AACF_Editable, true);
 
 							// 0 for prev and forward frame
-							if (a.Evaluate(targetFrame - 2) == 0) {
-								a.UpdateOrAddKey(0, targetFrame - 2);
+							if (a.Evaluate(PoseIndex - 1) == 0) {
+								a.UpdateOrAddKey(0, PoseIndex - 1);
 							}
-							if (a.Evaluate(targetFrame + 0) == 0) {
-								a.UpdateOrAddKey(0, targetFrame + 0);
+							if (a.Evaluate(PoseIndex + 1) == 0) {
+								a.UpdateOrAddKey(0, PoseIndex + 1);
 							}
-							a.UpdateOrAddKey((float)(shape.weight) / 100.f, targetFrame - 1);
+							a.UpdateOrAddKey((float)(shape.weight) / 100.f, PoseIndex);
 
 #if UE_VERSION_OLDER_THAN(5,0,0)
 #else
@@ -609,84 +803,38 @@ namespace {
 					if (addCurve) {
 						// new pose
 						SmartNamePoseList.Add(SmartPoseName);
-						targetFrame += 1;
 					}
 				}
 			}
 
-			// support arkit from vrm
+			// Use the nearest VRM expression when a model has no direct Perfect Sync morph.
 			{
-				TArray<FString> BlendFrom = {
-					TEXT("EyeBlinkLeft"),
-					TEXT("EyeBlinkRight"),
-					TEXT("JawOpen"),
-				};
-				TArray<FString> BlendTo = {
-					TEXT("Blink_L"),
-					TEXT("Blink_R"),
-					TEXT("A"),
-				};
-				for (auto& arkitMorph : arkitMorphName) {
-					int tableNo = BlendFrom.Find(arkitMorph);
-					if (tableNo < 0) {
-						continue;
-					}
-					const FString vrmMorph = BlendTo[tableNo];
+				for (const FPerfectSyncFallbackMapping& FallbackMapping : GetPerfectSyncFallbackMappings()) {
+					const FString& PerfectSyncPoseName = FallbackMapping.PerfectSyncPoseName;
+					const FString& VrmPoseName = FallbackMapping.VrmPoseName;
 
-					// arkit MorphName check
+					// Prefer a direct Perfect Sync morph when the model provides one.
 					{
-						FString* s = MorphNameList.FindByPredicate(
-							[&arkitMorph](const FString& str) {
-							return (arkitMorph.ToLower() == str.ToLower());
-						});
-						if (s) {
-							// has same arkit morph name
+						const FString* DirectMorph = MorphNameList.FindByPredicate(
+							[&PerfectSyncPoseName](const FString& MorphName) {
+								return MorphName.Equals(PerfectSyncPoseName, ESearchCase::IgnoreCase);
+							});
+						if (DirectMorph) {
 							continue;
 						}
 					}
 
-					int arMorphFrameNo = -1;
-					{
-#if UE_VERSION_OLDER_THAN(5,3,0)
-						FSmartName* m = SmartNamePoseList.FindByPredicate(
-							[&arkitMorph](FSmartName& name) {
-							return (arkitMorph.ToLower() == name.DisplayName.ToString().ToLower());
-						});
-#else
-						FName* m = SmartNamePoseList.FindByPredicate(
-							[&arkitMorph](FName& name) {
-								return (arkitMorph.ToLower() == name.ToString().ToLower());
-							});
-#endif
-						if (m == nullptr) continue;
-						arMorphFrameNo = SmartNamePoseList.Find(*m);
-					}
-					int vrmMorphFrameNo = -1;
-					{
-#if UE_VERSION_OLDER_THAN(5,3,0)
-						FSmartName* m = SmartNamePoseList.FindByPredicate(
-							[&vrmMorph](FSmartName& name) {
-							return (vrmMorph.ToLower() == name.DisplayName.ToString().ToLower());
-						});
-#else
-						FName* m = SmartNamePoseList.FindByPredicate(
-							[&vrmMorph](FName& name) {
-								return (vrmMorph.ToLower() == name.ToString().ToLower());
-							});
-#endif
-						if (m == nullptr) continue;
-						vrmMorphFrameNo = SmartNamePoseList.Find(*m);
-					}
-
-					decltype(auto) curves = GetCurves();
-					if (curves.Num() <= arMorphFrameNo || curves.Num() <= vrmMorphFrameNo) {
-						// range check
+					const int32 PerfectSyncPoseIndex = FindPoseIndexByName(SmartNamePoseList, PerfectSyncPoseName);
+					const int32 VrmPoseIndex = FindPoseIndexByName(SmartNamePoseList, VrmPoseName);
+					if (PerfectSyncPoseIndex == INDEX_NONE || VrmPoseIndex == INDEX_NONE) {
 						continue;
 					}
 
+					decltype(auto) curves = GetCurves();
+
 					bool bHasCurve = false;
 					for (auto& c : curves) {
-						if (c.Evaluate(arMorphFrameNo) >= 0.5f) {
+						if (c.Evaluate(PerfectSyncPoseIndex) >= 0.5f) {
 							bHasCurve = true;
 							break;
 						}
@@ -697,27 +845,34 @@ namespace {
 					}
 
 					for (auto& c : curves) {
-						if (c.Evaluate(arMorphFrameNo) == c.Evaluate(vrmMorphFrameNo)) {
+						const float VrmPoseValue = c.Evaluate(VrmPoseIndex);
+						if (c.Evaluate(PerfectSyncPoseIndex) == VrmPoseValue) {
 							continue;
 						}
 
 						// 0 for prev and forward frame
-						if (c.Evaluate(arMorphFrameNo - 1) == 0) {
-							c.UpdateOrAddKey(0, arMorphFrameNo - 1);
+						if (c.Evaluate(PerfectSyncPoseIndex - 1) == 0) {
+							c.UpdateOrAddKey(0, PerfectSyncPoseIndex - 1);
 						}
-						if (c.Evaluate(arMorphFrameNo + 1) == 0) {
-							c.UpdateOrAddKey(0, arMorphFrameNo + 1);
+						if (c.Evaluate(PerfectSyncPoseIndex + 1) == 0) {
+							c.UpdateOrAddKey(0, PerfectSyncPoseIndex + 1);
 						}
-						c.UpdateOrAddKey(c.Evaluate(vrmMorphFrameNo), arMorphFrameNo);
+						c.UpdateOrAddKey(VrmPoseValue, PerfectSyncPoseIndex);
+
+#if UE_VERSION_OLDER_THAN(5,2,0)
+#else
+						FAnimationCurveIdentifier CurveId(GetCurveSmartName(c), ERawCurveTrackTypes::RCT_Float);
+						DataController.SetCurveKeys(CurveId, c.FloatCurve.GetConstRefOfKeys());
+#endif
+					}
+
+					for (FPreviewMorphCurve& PreviewMorphCurve : PreviewMorphCurves) {
+						const float* VrmPoseValue = PreviewMorphCurve.ValuesByPose.Find(VrmPoseIndex);
+						if (VrmPoseValue) {
+							PreviewMorphCurve.ValuesByPose.Add(PerfectSyncPoseIndex, *VrmPoseValue);
+						}
 					}
 				}
-#if UE_VERSION_OLDER_THAN(5,0,0)
-#else
-				//FAnimationCurveIdentifier CurveId(curveName, ERawCurveTrackTypes::RCT_Float);
-				//DataController.AddCurve(CurveId);
-				//DataController.SetCurveKeys(CurveId, a.FloatCurve.GetConstRefOfKeys());
-#endif
-
 			}
 
 
@@ -770,6 +925,7 @@ namespace {
 			pose->ConvertSpace(true, 0);
 
 		}
+		CreateFacePreviewAnimation(vrmAssetList, sk, k, PreviewMorphCurves, SmartNamePoseList.Num());
 #if	UE_VERSION_OLDER_THAN(5,0,0)
 		ase->PreSave(nullptr);
 #else
