@@ -300,14 +300,14 @@ namespace {
 #endif
 	}
 
-	static void CreateFacePreviewAnimation(
+	static UAnimSequence* CreateFacePreviewAnimation(
 		UVrmAssetListObject* VrmAssetList,
 		USkeletalMesh* SkeletalMesh,
 		USkeleton* Skeleton,
 		const TArray<FPreviewMorphCurve>& PreviewMorphCurves,
 		int32 PoseCount) {
 		if (VrmAssetList == nullptr || SkeletalMesh == nullptr || Skeleton == nullptr || PoseCount <= 0) {
-			return;
+			return nullptr;
 		}
 
 		const FString PreviewAnimName = FString(TEXT("A_face_preview_")) + VrmAssetList->BaseFileName;
@@ -390,6 +390,8 @@ namespace {
 		PreviewAnimation->PreSave(nullptr);
 #endif
 		PreviewAnimation->PostEditChange();
+
+		return PreviewAnimation;
 	}
 
 	static const TArray<FString>& GetPerfectSyncPoseNames() {
@@ -1176,7 +1178,8 @@ namespace {
 
 		}
 		AddMetaHumanMarkerCurves(ase, k, MetaHumanPoseFrames, SmartNamePoseList.Num());
-		CreateFacePreviewAnimation(vrmAssetList, sk, k, PreviewMorphCurves, SmartNamePoseList.Num());
+		UAnimSequence* FacePreviewAnimation = CreateFacePreviewAnimation(vrmAssetList, sk, k, PreviewMorphCurves, SmartNamePoseList.Num());
+		AddMetaHumanMarkerCurves(FacePreviewAnimation, k, MetaHumanPoseFrames, SmartNamePoseList.Num());
 #if	UE_VERSION_OLDER_THAN(5,0,0)
 		ase->PreSave(nullptr);
 #else
