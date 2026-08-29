@@ -3,6 +3,7 @@
 #include "VrmConvertRig.h"
 #include "VrmConvert.h"
 #include "VrmUtil.h"
+#include "VRM4ULoaderLog.h"
 
 #include "VrmAssetListObject.h"
 #include "VrmMetaObject.h"
@@ -765,12 +766,38 @@ namespace {
 				return c.GetName();
 			};
 #endif
+			// A VRM file can define its own custom blend shape clip using the exact
+			// same name as a PerfectSync/MetaHuman pose (this is common: VRM authors
+			// add ARKit-named clips for VSeeFace/PerfectSync support). If we then add
+			// ANOTHER pose under that same name, SmartNamePoseList ends up with a
+			// duplicate entry, and UPoseAsset::CreatePoseFromAnimation cannot keep two
+			// poses with the same name straight - later poses silently end up reading
+			// an earlier, unrelated pose's frame data. Guard against that here.
+			auto IsPoseNameAlreadyUsed = [&](const FString& NameToCheck) {
+				for (const auto& ExistingName : SmartNamePoseList) {
+#if UE_VERSION_OLDER_THAN(5,3,0)
+					if (ExistingName.DisplayName.ToString().Equals(NameToCheck, ESearchCase::IgnoreCase)) {
+#else
+					if (ExistingName.ToString().Equals(NameToCheck, ESearchCase::IgnoreCase)) {
+#endif
+						return true;
+					}
+				}
+				return false;
+			};
 			auto AddPerfectSyncPoses = [&]() {
 				// Perfect Sync (ARKit) blend shapes and Live Link rotation curves.
 				const TArray<FPerfectSyncMorphMapping> PerfectSyncMappings = BuildPerfectSyncMorphMappings(MorphNameList);
 				for (const FPerfectSyncMorphMapping& Mapping : PerfectSyncMappings) {
 					const FString& PerfectSyncPoseName = Mapping.PoseName;
 					const FString& ModelMorphName = Mapping.MorphTargetName;
+
+					if (IsPoseNameAlreadyUsed(PerfectSyncPoseName)) {
+						// Already created (e.g. by a same-named VRM blend shape clip) -
+						// do not add a second, duplicate-named pose.
+						continue;
+					}
+
 					const int32 PoseIndex = SmartNamePoseList.Num();
 					SetPreviewMorphValue(
 						PreviewMorphCurves,
@@ -817,6 +844,17 @@ namespace {
 
 					// Anim to Pose
 					if (bSameName == false) {
+						// Re-resolve the curve index by name instead of trusting the index
+						// captured before AddCurve above: the curve array is not guaranteed to
+						// simply grow by appending at the previously-observed Num(), which can
+						// silently alias this write onto an unrelated existing curve.
+						targetNo = 0;
+						for (decltype(auto) c2 : GetCurves()) {
+							if (GetCurveName(c2).ToString().Equals(ModelMorphName, ESearchCase::IgnoreCase)) {
+								break;
+							}
+							++targetNo;
+						}
 						decltype(auto) c = GetCurves();
 						auto& a = c[targetNo];
 
@@ -851,6 +889,12 @@ namespace {
 				}
 
 				for (const FString& MetaHumanCurveName : MetaHumanCurveNames) {
+					if (IsPoseNameAlreadyUsed(MetaHumanCurveName)) {
+						// Already created as a pose under this exact name earlier in this
+						// same import pass - do not add a duplicate-named pose.
+						continue;
+					}
+
 					bool bHasTargetMorph = false;
 					for (const FMetaHumanCurveContribution& Contribution : Contributions) {
 						if (Contribution.MetaHumanCurveName != MetaHumanCurveName) {
@@ -904,6 +948,19 @@ namespace {
 						DataController.AddCurve(AddedCurveId);
 #endif
 
+						// Re-resolve the curve index by name instead of trusting the index
+						// captured before AddCurve above: the curve array is not guaranteed to
+						// simply grow by appending at the previously-observed Num(), which can
+						// silently alias this write onto an unrelated existing curve (this is
+						// what caused MetaHuman curves such as CTRL_expressions_noseWrinkleR to
+						// end up driving an unrelated morph such as EyeWideRight).
+						TargetCurveIndex = 0;
+						for (decltype(auto) Curve2 : GetCurves()) {
+							if (GetCurveName(Curve2).ToString().Equals(ModelMorphName, ESearchCase::IgnoreCase)) {
+								break;
+							}
+							++TargetCurveIndex;
+						}
 						decltype(auto) Curves = GetCurves();
 						auto& Curve = Curves[TargetCurveIndex];
 						Curve.SetCurveTypeFlag(AACF_Editable, true);
@@ -922,6 +979,11 @@ namespace {
 						DataController.SetCurveKeys(CurveId, Curve.FloatCurve.GetConstRefOfKeys());
 #endif
 
+						UE_LOG(LogVRM4ULoader, Log,
+							TEXT("[VRM4U MetaHumanPose] curve=%s perfectSyncPose=%s modelMorph=%s poseIndex=%d targetCurveIndex=%d writtenCurveName=%s weight=%f"),
+							*MetaHumanCurveName, *Contribution.PerfectSyncPoseName, *ModelMorphName, PoseIndex, TargetCurveIndex,
+							*GetCurveName(Curve).ToString(), Contribution.Weight);
+
 						SetPreviewMorphValue(
 							PreviewMorphCurves,
 							ModelMorphName,
@@ -929,6 +991,7 @@ namespace {
 							Contribution.Weight);
 					}
 
+					UE_LOG(LogVRM4ULoader, Log, TEXT("[VRM4U MetaHumanPose] pose '%s' -> frame=%d"), *MetaHumanCurveName, PoseIndex);
 					MetaHumanPoseFrames.Add({MetaHumanCurveName, PoseIndex});
 					SmartNamePoseList.Add(SmartPoseName);
 				}
@@ -940,6 +1003,12 @@ namespace {
 
 					if (group.name == "") continue;
 					if (group.BlendShape.Num() == 0) continue;
+
+					if (IsPoseNameAlreadyUsed(group.name)) {
+						// Already created as a pose under this exact name earlier in this
+						// same import pass - do not add a duplicate-named pose.
+						continue;
+					}
 
 					auto SmartPoseName = GetUniquePoseName(k, *group.name, true);
 					const int32 PoseIndex = SmartNamePoseList.Num();
@@ -1025,6 +1094,17 @@ namespace {
 #endif
 
 						if (bSameName == false) {
+							// Re-resolve the curve index by name instead of trusting the index
+							// captured before AddCurve above: the curve array is not guaranteed to
+							// simply grow by appending at the previously-observed Num(), which can
+							// silently alias this write onto an unrelated existing curve.
+							targetNo = 0;
+							for (decltype(auto) c2 : GetCurves()) {
+								if (GetCurveName(c2).ToString().ToLower() == shape.morphTargetName.ToLower()) {
+									break;
+								}
+								++targetNo;
+							}
 							decltype(auto) c = GetCurves();
 							auto& a = c[targetNo];
 
@@ -1167,6 +1247,28 @@ namespace {
 		}
 
 		if (SmartNamePoseList.Num() > 0) {
+			{
+				// Diagnostic dump: list every pose name in order along with its frame
+				// index, and flag any duplicate name (a duplicate would make
+				// CreatePoseFromAnimation associate more than one MetaHuman/PerfectSync
+				// curve with the same pose, which looks like "the wrong morph moves").
+				TMap<FString, int32> SeenPoseNames;
+				for (int32 DumpIndex = 0; DumpIndex < SmartNamePoseList.Num(); ++DumpIndex) {
+#if UE_VERSION_OLDER_THAN(5,3,0)
+					const FString DumpPoseName = SmartNamePoseList[DumpIndex].DisplayName.ToString();
+#else
+					const FString DumpPoseName = SmartNamePoseList[DumpIndex].ToString();
+#endif
+					UE_LOG(LogVRM4ULoader, Log, TEXT("[VRM4U PoseDump] frame=%d pose=%s"), DumpIndex, *DumpPoseName);
+
+					const int32* PrevIndex = SeenPoseNames.Find(DumpPoseName.ToLower());
+					if (PrevIndex) {
+						UE_LOG(LogVRM4ULoader, Warning, TEXT("[VRM4U PoseDump] DUPLICATE pose name '%s' at frame=%d (first seen at frame=%d)"), *DumpPoseName, DumpIndex, *PrevIndex);
+					} else {
+						SeenPoseNames.Add(DumpPoseName.ToLower(), DumpIndex);
+					}
+				}
+			}
 			pose->CreatePoseFromAnimation(ase, &SmartNamePoseList);
 #if	UE_VERSION_OLDER_THAN(5,3,0)
 #else
