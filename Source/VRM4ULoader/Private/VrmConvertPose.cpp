@@ -353,7 +353,18 @@ namespace {
 				Curve.UpdateOrAddKey(Value ? *Value : 0.f, static_cast<float>(PoseIndex));
 			}
 #else
+
+#if UE_VERSION_OLDER_THAN(5,7,0)
+			Skeleton->AddCurveMetaData(CurveName);
+			if (UAnimCurveMetaData* CurveMetaData =
+				Skeleton->GetAssetUserData<UAnimCurveMetaData>())
+			{
+				CurveMetaData->SetCurveMetaDataMorphTarget(CurveName, true);
+			}
+#else
 			Skeleton->SetCurveMetaDataMorphTarget(CurveName, true);
+#endif
+
 			const FAnimationCurveIdentifier CurveId(CurveName, ERawCurveTrackTypes::RCT_Float);
 			PreviewDataController.AddCurve(CurveId);
 			PreviewDataController.SetCurveFlag(CurveId, AACF_Editable, true);
