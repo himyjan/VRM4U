@@ -279,7 +279,7 @@ namespace {
 		IAnimationDataController& MarkerDataController = Animation->GetController();
 		IAnimationDataController::FScopedBracket MarkerScopedBracket(&MarkerDataController, FText());
 		for (const FMetaHumanPoseFrame& PoseFrame : MetaHumanPoseFrames) {
-			const FName CurveName = GetUniquePoseName(Skeleton, PoseFrame.CurveName, true);
+			const auto CurveName = GetUniquePoseName(Skeleton, PoseFrame.CurveName, true);
 			const FAnimationCurveIdentifier CurveId(CurveName, ERawCurveTrackTypes::RCT_Float);
 			MarkerDataController.AddCurve(CurveId);
 			MarkerDataController.SetCurveFlag(CurveId, AACF_Editable, true);
@@ -354,7 +354,9 @@ namespace {
 			}
 #else
 
-#if UE_VERSION_OLDER_THAN(5,7,0)
+#if UE_VERSION_OLDER_THAN(5,3,0)
+			Skeleton->AccumulateCurveMetaData(CurveName.DisplayName, false, true);
+#elif UE_VERSION_OLDER_THAN(5,7,0)
 			Skeleton->AddCurveMetaData(CurveName);
 			if (UAnimCurveMetaData* CurveMetaData =
 				Skeleton->GetAssetUserData<UAnimCurveMetaData>())
